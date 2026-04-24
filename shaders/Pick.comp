@@ -1,0 +1,87 @@
+#version 450
+
+struct Particle {
+    vec4 pos;
+    vec4 color;
+    vec4 vel;
+    vec4 originPos;
+    vec4 prevPos;
+    vec4 normal;
+    float invMass;
+    float isFixed;
+    float isSurface;
+    float padding;
+};
+
+struct Ray {
+    vec3 origin;
+    float pad0;
+    vec3 direction;
+    float pad1;
+};
+
+layout(std430, binding = 0) readonly buffer InputNodes { Particle nodesIn[]; };
+layout(std430, binding = 4) buffer InteractionBuffer {
+    int selectedIndex;
+    uint minDist;
+    float depth;
+    float padding;
+} interaction;
+
+layout(push_constant) uniform PushConstants {
+    float dt;
+    float u_Time;
+    int subStepCnt;
+    int iteration;
+    int constraintOffset;
+    int constraintCount;
+    int isPressed;
+    int pickPass; // 0: Reset, 1: Min Dist 계산, 2: Index 저장
+    Ray mouseRay;
+} pc;
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+
+    // [Pass 0] 변수 초기화 (스레드 1개만 실행)
+    if (pc.pickPass == 0) {
+        if (index == 0) {
+            interaction.selectedIndex = -1;
+            interaction.minDist = 0xFFFFFFFF;
+        }
+        return;
+    }
+
+    if(index >= nodesIn.length()) return;
+
+    Particle p = nodesIn[index];
+    // 고정된 점이나 질량이 없는 점은 피킹에서 제외
+    if (p.invMass == 0.0 && p.isFixed > 0.5) return;
+
+    // Ray와의 거리 계산
+    vec3 toNode = p.pos.xyz - pc.mouseRay.origin;
+    float t = dot(toNode, pc.mouseRay.direction);
+    if (t < 0.0) return; // 카메라 뒤쪽 패스
+
+    vec3 closestPoint = pc.mouseRay.origin + t * pc.mouseRay.direction;
+    float distToRay = length(p.pos.xyz - closestPoint);
+
+    // 마우스 반경(0.1) 이내일 경우
+    if (distToRay < 0.1) {
+        uint udist = floatBitsToUint(t);
+        
+        // [Pass 1] 가장 짧은 거리를 원자적 연산으로 기록
+        if (pc.pickPass == 1) {
+            atomicMin(interaction.minDist, udist);
+        } 
+        // [Pass 2] 자신이 가장 짧은 거리의 주인공인지 확인하고 인덱스 기록
+        else if (pc.pickPass == 2) {
+            if (udist == interaction.minDist) {
+                interaction.selectedIndex = int(index);
+                interaction.depth = t;
+            }
+        }
+    }
+}

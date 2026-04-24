@@ -1,0 +1,93 @@
+#version 450
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct Particle {
+    vec4 pos;
+    vec4 color;
+    vec4 vel;
+    vec4 originPos;
+    vec4 prevPos;
+    vec4 normal;
+    float invMass;
+    float isFixed;
+    float isSurface;
+    float padding;
+};
+
+struct Ray {
+    vec3 origin;
+    float pad0;
+    vec3 direction;
+    float pad1;
+};
+
+struct DistanceConstraint {
+    uint p1, p2;
+    float restLen;
+    float compliance; // alpha
+    float lambda;
+    float padding1, padding2, padding3;
+};
+
+layout(std430, binding = 1) buffer Particles { Particle particles[]; };
+layout(std430, binding = 2) buffer DistConstraints { DistanceConstraint constraints[]; };
+
+layout(push_constant) uniform PushConstants {
+    float dt;
+    float u_Time;
+    int subStepCnt;
+    int iteration;
+    int constraintOffset;
+    int constraintCount;
+	int isPressed;
+    int pickPass;
+    Ray mouseRay;
+} pc;
+
+void main() {
+    if (gl_GlobalInvocationID.x >= pc.constraintCount) return;
+    uint idx = gl_GlobalInvocationID.x + pc.constraintOffset;
+
+    // 서브스텝의 첫 이터레이션일 때 람다 초기화
+    if (pc.iteration == 0) {
+        constraints[idx].lambda = 0.0;
+    }
+
+    uint p1 = constraints[idx].p1;
+    uint p2 = constraints[idx].p2;
+
+    float w1 = particles[p1].invMass;
+    float w2 = particles[p2].invMass;
+    float w = w1 + w2;
+    
+    // 두 점 모두 고정점(역질량이 0)이면 계산 생략
+    if (w == 0.0) return;
+
+    vec3 x1 = particles[p1].pos.xyz;
+    vec3 x2 = particles[p2].pos.xyz;
+    vec3 dir = x1 - x2;
+    float currentLen = length(dir);
+    
+    // 점이 완전히 겹쳤을 때의 0 나누기 방지
+    if (currentLen < 0.0001) return;
+    vec3 n = dir / currentLen;
+
+    // 1. C(x): 현재 거리와 초기 거리의 차이
+    float C = currentLen - constraints[idx].restLen;
+    
+    // 2. XPBD 알파 값 계산 (compliance / dt^2)
+    float sdt = pc.dt / float(pc.subStepCnt);
+    float alpha_tilde = constraints[idx].compliance / (sdt * sdt);
+
+    // 3. 람다 변화량(dlambda) 계산
+    float dlambda = (-C - alpha_tilde * constraints[idx].lambda) / (w + alpha_tilde);
+    constraints[idx].lambda += dlambda;
+
+    // 4. 위치 변화량(Delta X) 계산
+    vec3 dx1 =  dlambda * w1 * n;
+    vec3 dx2 = -dlambda * w2 * n;
+
+    // 5. 위치 업데이트 (고정점이 아닐 때만)
+    if (particles[p1].isFixed == 0.0) particles[p1].pos.xyz += dx1;
+    if (particles[p2].isFixed == 0.0) particles[p2].pos.xyz += dx2;
+}
