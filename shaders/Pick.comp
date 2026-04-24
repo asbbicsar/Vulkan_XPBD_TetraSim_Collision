@@ -36,7 +36,7 @@ layout(push_constant) uniform PushConstants {
     int constraintOffset;
     int constraintCount;
     int isPressed;
-    int pickPass; // 0: Reset, 1: Min Dist 계산, 2: Index 저장
+    int pickPass; // 0: Reset, 1: Caculate Min Dist, 2: Saving Information
     Ray mouseRay;
 } pc;
 
@@ -45,7 +45,7 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 void main() {
     uint index = gl_GlobalInvocationID.x;
 
-    // [Pass 0] 변수 초기화 (스레드 1개만 실행)
+    // [Pass 0] initializing (only 1 thread runs)
     if (pc.pickPass == 0) {
         if (index == 0) {
             interaction.selectedIndex = -1;
@@ -57,26 +57,24 @@ void main() {
     if(index >= nodesIn.length()) return;
 
     Particle p = nodesIn[index];
-    // 고정된 점이나 질량이 없는 점은 피킹에서 제외
     if (p.invMass == 0.0 && p.isFixed > 0.5) return;
 
-    // Ray와의 거리 계산
     vec3 toNode = p.pos.xyz - pc.mouseRay.origin;
     float t = dot(toNode, pc.mouseRay.direction);
-    if (t < 0.0) return; // 카메라 뒤쪽 패스
+    if (t < 0.0) return; // backface culling
 
     vec3 closestPoint = pc.mouseRay.origin + t * pc.mouseRay.direction;
     float distToRay = length(p.pos.xyz - closestPoint);
 
-    // 마우스 반경(0.1) 이내일 경우
     if (distToRay < 0.1) {
         uint udist = floatBitsToUint(t);
         
-        // [Pass 1] 가장 짧은 거리를 원자적 연산으로 기록
+        // [Pass 1] record the closest distance using atomic operation
         if (pc.pickPass == 1) {
             atomicMin(interaction.minDist, udist);
         } 
-        // [Pass 2] 자신이 가장 짧은 거리의 주인공인지 확인하고 인덱스 기록
+        // [Pass 2] check if this thread's distance is minimum
+        // and if so, write the information to the buffer
         else if (pc.pickPass == 2) {
             if (udist == interaction.minDist) {
                 interaction.selectedIndex = int(index);
