@@ -89,7 +89,7 @@ struct InteractionState {
     int selectedNodeIndex;
     uint32_t minDist;
     float depth;
-    float padding;
+    float lambda;
 };
 
 struct MeshPushConstants {
@@ -546,6 +546,7 @@ private:
     VkPipelineLayout computePipelineLayout;
     VkPipeline pickPipeline;
     VkPipeline predictPipeline;
+    VkPipeline solveMousePipeline;
     VkPipeline solveDistPipeline;
     VkPipeline solveVolPipeline;
     VkPipeline updatePipeline;
@@ -731,6 +732,7 @@ private:
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
         vkDestroyPipeline(device, pickPipeline, nullptr);
         vkDestroyPipeline(device, predictPipeline, nullptr);
+        vkDestroyPipeline(device, solveMousePipeline, nullptr);
         vkDestroyPipeline(device, solveDistPipeline, nullptr);
         vkDestroyPipeline(device, solveVolPipeline, nullptr);
         vkDestroyPipeline(device, updatePipeline, nullptr);
@@ -1186,6 +1188,7 @@ private:
         // 3. 실제 파이프라인 생성 호출
         createPipeline("shaders/Pick.comp.spv", pickPipeline);
         createPipeline("shaders/Predict.comp.spv", predictPipeline); // 
+        createPipeline("shaders/SolveMouse.comp.spv", solveMousePipeline); //
         createPipeline("shaders/SolveDist.comp.spv", solveDistPipeline); //
         createPipeline("shaders/SolveVol.comp.spv", solveVolPipeline);     // 
         createPipeline("shaders/Update.comp.spv", updatePipeline);   // 
@@ -1866,6 +1869,13 @@ private:
             int constraintCount = 4;
             for (int j = 0; j < constraintCount; j++) {
                 pc.iteration = j;
+
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, solveMousePipeline);
+                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[writeIdx], 0, nullptr);
+                vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MeshPushConstants), &pc);
+                vkCmdDispatch(commandBuffer, 1, 1, 1);
+                addComputeBarrier(commandBuffer, shaderStorageBuffers[writeIdx]);
+
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, solveDistPipeline);
                 vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout,
                     0, 1, &computeDescriptorSets[writeIdx], 0, nullptr);

@@ -33,7 +33,7 @@ layout(std430, binding = 4) buffer InteractionBuffer {
     int selectedIndex;
     uint minDist;
     float depth;
-    float padding;
+    float lambda;
 } interaction;
 
 // dt(타임스텝)를 받는 Push Constant
@@ -88,21 +88,27 @@ void main() {
     float sdt = pc.dt / float(pc.subStepCnt);
 
     // --- 마우스 드래깅 로직 ---
-    if (pc.isPressed == 1 && interaction.selectedIndex == int(index)) {
-        // 선택된 파티클의 위치를 Ray 상으로 이동
-        p = pc.mouseRay.origin + interaction.depth * pc.mouseRay.direction;
-        
-        // 속도 초기화 및 무한 질량 처리(고정)
-        v = vec3(0.0);
-        invMass = 0.0;
-        current.invMass = 0.0; 
+    //if (pc.isPressed == 1 && interaction.selectedIndex == int(index)) {
+    //    // 선택된 파티클의 위치를 Ray 상으로 이동
+    //    p = pc.mouseRay.origin + interaction.depth * pc.mouseRay.direction;
+    //    
+    //    // 속도 초기화 및 무한 질량 처리(고정)
+    //    v = vec3(0.0);
+    //    invMass = 0.0;
+    //    current.invMass = 0.0; 
+    //}
+    //else {
+    //    v *= pow(damping, 1.0 / float(pc.subStepCnt));
+    //    if(invMass > 0.0) {
+    //        p = p + v * sdt + force * sdt * sdt;
+    //    }
+    //}
+
+    v *= pow(damping, 1.0 / float(pc.subStepCnt));
+    if(invMass > 0.0) {
+        p = p + v * sdt + force * sdt * sdt;
     }
-    else {
-        v *= pow(damping, 1.0 / float(pc.subStepCnt));
-        if(invMass > 0.0) {
-            p = p + v * sdt + force * sdt * sdt;
-        }
-    }
+    
     current.pos = vec4(p, 1.0);
     current.vel = vec4(v, 0.0);
     nodesOut[index] = current;

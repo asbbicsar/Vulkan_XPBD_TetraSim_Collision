@@ -1,0 +1,78 @@
+#version 450
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+struct Particle {
+    vec4 pos;
+    vec4 color;
+    vec4 vel;
+    vec4 originPos;
+    vec4 prevPos;
+    vec4 normal;
+    float invMass;
+    float isFixed;
+    float isSurface;
+    float padding;
+};
+
+struct Ray {
+    vec3 origin;
+    float pad0;
+    vec3 direction;
+    float pad1;
+};
+
+layout(std430, binding = 1) buffer Particles { Particle particles[]; };
+layout(std430, binding = 4) buffer InteractionBuffer {
+    int selectedIndex;
+    uint minDist;
+    float depth;
+    float lambda;
+} interaction;
+
+layout(push_constant) uniform PushConstants {
+    float dt;
+    float u_Time;
+    int subStepCnt;
+    int iteration;
+    int constraintOffset;
+    int constraintCount;
+    int isPressed;
+    int pickPass;
+    Ray mouseRay;
+} pc;
+
+void main() {
+    // 마우스가 안 눌려있거나 선택된 노드가 없으면 종료
+    if (pc.isPressed == 0 || interaction.selectedIndex == -1) return;
+
+    // 첫 이터레이션에서 람다 초기화
+    if (pc.iteration == 0) {
+        interaction.lambda = 0.0;
+    }
+
+    uint pIdx = uint(interaction.selectedIndex);
+    float w = particles[pIdx].invMass;
+    if (w == 0.0) return; // 고정점이면 계산 생략
+
+    vec3 currentPos = particles[pIdx].pos.xyz;
+    // 마우스 Ray 상의 타겟 위치 (Drag Target)
+    vec3 targetPos = pc.mouseRay.origin + interaction.depth * pc.mouseRay.direction;
+
+    vec3 dir = currentPos - targetPos;
+    float C = length(dir);
+    if (C < 0.0001) return;
+
+    vec3 n = dir / C;
+
+    // compliance가 클수록 고무줄처럼 부드럽게 늘어납니다 (Softness 조절)
+    // 0.0이면 쇠막대기처럼 딱딱해집니다 (불안정해질 수 있음)
+    float compliance = 0.01; 
+    float sdt = pc.dt / float(pc.subStepCnt);
+    float alpha_tilde = compliance / (sdt * sdt);
+
+    float dlambda = (-C - alpha_tilde * interaction.lambda) / (w + alpha_tilde);
+    interaction.lambda += dlambda;
+
+    // 파티클 위치 업데이트
+    particles[pIdx].pos.xyz += dlambda * w * n;
+}
