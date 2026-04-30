@@ -23,6 +23,8 @@
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
+const uint32_t TABLE_SIZE = 100003; // Hash table size (Prime number)
+const uint32_t MAX_PER_CELL = 15;   // Maximum particles per cell
 
 const int MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -140,8 +142,10 @@ struct Particle {
     glm::vec4 normal;
     float invMass;
     float isFixed;
-    float isSurface;
+    float isSurface; 
     float padding;
+
+    glm::vec4 colData; //(x: radius, y : objectID, z : padding, w : padding)
 
     static VkVertexInputBindingDescription getBindingDescription() {
         VkVertexInputBindingDescription bindingDescription{};
@@ -507,6 +511,12 @@ ColoredVolumeResult colorVolumeConstraints(const std::vector<VolumeConstraint>& 
     return result;
 }
 
+struct HashCell {
+    uint32_t count;
+    uint32_t pIndices[MAX_PER_CELL];
+};
+
+
 class HelloTriangleApplication {
 public:
     void run() {
@@ -546,9 +556,12 @@ private:
     VkPipelineLayout computePipelineLayout;
     VkPipeline pickPipeline;
     VkPipeline predictPipeline;
+    VkPipeline hashClearPipeline;
+    VkPipeline hashInsertPipeline;
     VkPipeline solveMousePipeline;
     VkPipeline solveDistPipeline;
     VkPipeline solveVolPipeline;
+    VkPipeline solveCollisionPipeline;
     VkPipeline updatePipeline;
 
     VkDescriptorSetLayout descriptorSetLayout;
@@ -561,6 +574,7 @@ private:
     std::vector<Tetrahedron> tetras;
     std::vector<Edge> edges;
     std::vector<Face> faces;
+    std::vector<HashCell> cells;
 
     std::vector<uint32_t> indices;
 
@@ -574,6 +588,8 @@ private:
     std::vector<VkDeviceMemory> shaderStorageBuffersMemory;
     std::vector<VkBuffer> interactionBuffers;
     std::vector<VkDeviceMemory> interactionBuffersMemory;
+    std::vector<VkBuffer> hashBuffers;
+    std::vector<VkDeviceMemory> hashBuffersMemory;
     std::vector<void*> interactionBuffersMapped;
 
     VkBuffer indexBuffer;
@@ -610,29 +626,67 @@ private:
 
     bool framebufferResized = false;
 
-    void loadMesh(const std::string& nodeFile, const std::string& eleFile, const std::string& edgeFile, const std::string& faceFile) {
+    void loadMesh(const std::string& nodeFile, 
+        const std::string& eleFile, 
+        const std::string& edgeFile, 
+        const std::string& faceFile,
+        glm::vec3 initialOffset = glm::vec3(0.0f),
+        float objectID = 0.0f) 
+    {
         int startIndex;
-        if (!parseNodeFile(nodeFile, particles, startIndex)) {
+        uint32_t indexOffset = particles.size(); // 기존 파티클 개수를 오프셋으로 사용
+
+        std::vector<Particle> tempParticles;
+        std::vector<Tetrahedron> tempTetras;
+        std::vector<Edge> tempEdges;
+        std::vector<Face> tempFaces;
+
+        if (!parseNodeFile(nodeFile, tempParticles, startIndex)) {
             throw std::runtime_error("Failed to load node file!");
         }
-        if (!parseEleFile(eleFile, startIndex, tetras)) {
-            throw std::runtime_error("Failed to load ele file!");
+
+        // 초기 위치 조정 (두 객체가 겹치지 않게 하기 위함)
+        for (auto& p : tempParticles) {
+            p.pos.x += initialOffset.x;
+            p.pos.y += initialOffset.y;
+            p.pos.z += initialOffset.z;
+            p.originPos = p.pos;
+            p.prevPos = p.pos;
+
+            p.colData = glm::vec4(0.05f, objectID, 0.0f, 0.0f);
         }
-        if (!parseEdgeFile(edgeFile, startIndex, edges)) {
-            throw std::runtime_error("Failed to load edge file!");
+        particles.insert(particles.end(), tempParticles.begin(), tempParticles.end());
+
+        if (!parseEleFile(eleFile, startIndex, tempTetras)) { /* 에러 처리 */ }
+        for (auto& tet : tempTetras) {
+            for (int i = 0; i < 4; ++i) tet.indices[i] += indexOffset;
+            tetras.push_back(tet);
         }
-        if (!parseFaceFile(faceFile, startIndex, faces)) {
-            throw std::runtime_error("Failed to load face file!");
+
+        if (!parseEdgeFile(edgeFile, startIndex, tempEdges)) { /* 에러 처리 */ }
+        for (auto& edge : tempEdges) {
+            for (int i = 0; i < 2; ++i) edge.indices[i] += indexOffset;
+            edges.push_back(edge);
         }
-        indices.clear();
-        indices.reserve(faces.size() * 3);
-        for (const auto& face : faces) {
-            indices.push_back(face.indices[0]);
-            indices.push_back(face.indices[1]);
-            indices.push_back(face.indices[2]);
+
+        if (!parseFaceFile(faceFile, startIndex, tempFaces)) { /* 에러 처리 */ }
+        for (auto& face : tempFaces) {
+            for (int i = 0; i < 3; ++i) {
+                face.indices[i] += indexOffset;
+                indices.push_back(face.indices[i]); // 렌더링용 index buffer
+            }
+            faces.push_back(face);
         }
     }
 
+    void initHashCells()
+    {
+        cells.resize(TABLE_SIZE);
+        for (auto& cell : cells) {
+            cell.count = 0;
+        }
+    }
+    
     void createConstraints() {
         if (!generateDistanceConstraints(particles, edges, stiffness, distanceConstraints)) {
             throw std::runtime_error("Failed to generate distance constraints!");
@@ -658,7 +712,7 @@ private:
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
-        window = glfwCreateWindow(WIDTH, HEIGHT, "XPBD TetraSim Interactive", nullptr, nullptr);
+        window = glfwCreateWindow(WIDTH, HEIGHT, "XPBD TetraSim Collision", nullptr, nullptr);
         glfwSetWindowUserPointer(window, this);
         glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
     }
@@ -673,7 +727,17 @@ private:
             "models/bunny_1k.1.node",
             "models/bunny_1k.1.ele",
             "models/bunny_1k.1.edge",
-            "models/bunny_1k.1.face");
+            "models/bunny_1k.1.face",
+            glm::vec3(0.0f, 3.0f, 0.0f),
+            1.0f);
+        loadMesh(
+            "models/bunny_1k.1.node",
+            "models/bunny_1k.1.ele",
+            "models/bunny_1k.1.edge",
+            "models/bunny_1k.1.face",
+            glm::vec3(0.0f, 0.0f, 0.0f),
+            2.0f);
+        initHashCells();
         createConstraints();
         createInstance();
         setupDebugMessenger();
@@ -693,6 +757,7 @@ private:
         createCommandPool();
         createShaderStorageBuffer();
         createInteractionBuffer();
+		createHashBuffer();
         createDistanceConstraintBuffer();
         createVolumeConstraintBuffer();
         createIndexBuffer();
@@ -732,9 +797,12 @@ private:
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
         vkDestroyPipeline(device, pickPipeline, nullptr);
         vkDestroyPipeline(device, predictPipeline, nullptr);
+        vkDestroyPipeline(device, hashClearPipeline, nullptr);
+        vkDestroyPipeline(device, hashInsertPipeline, nullptr);
         vkDestroyPipeline(device, solveMousePipeline, nullptr);
         vkDestroyPipeline(device, solveDistPipeline, nullptr);
         vkDestroyPipeline(device, solveVolPipeline, nullptr);
+        vkDestroyPipeline(device, solveCollisionPipeline, nullptr);
         vkDestroyPipeline(device, updatePipeline, nullptr);
         vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);
         vkDestroyRenderPass(device, renderPass, nullptr);
@@ -750,6 +818,8 @@ private:
             vkFreeMemory(device, shaderStorageBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, interactionBuffers[i], nullptr);
             vkFreeMemory(device, interactionBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, hashBuffers[i], nullptr);
+            vkFreeMemory(device, hashBuffersMemory[i], nullptr);
         }
 
         vkDestroyBuffer(device, indexBuffer, nullptr);
@@ -1187,11 +1257,14 @@ private:
 
         // 3. 실제 파이프라인 생성 호출
         createPipeline("shaders/Pick.comp.spv", pickPipeline);
-        createPipeline("shaders/Predict.comp.spv", predictPipeline); // 
-        createPipeline("shaders/SolveMouse.comp.spv", solveMousePipeline); //
-        createPipeline("shaders/SolveDist.comp.spv", solveDistPipeline); //
-        createPipeline("shaders/SolveVol.comp.spv", solveVolPipeline);     // 
-        createPipeline("shaders/Update.comp.spv", updatePipeline);   // 
+        createPipeline("shaders/Predict.comp.spv", predictPipeline);
+		createPipeline("shaders/HashClear.comp.spv", hashClearPipeline);
+		createPipeline("shaders/HashInsert.comp.spv", hashInsertPipeline);
+        createPipeline("shaders/SolveMouse.comp.spv", solveMousePipeline);
+        createPipeline("shaders/SolveDist.comp.spv", solveDistPipeline);
+        createPipeline("shaders/SolveVol.comp.spv", solveVolPipeline);
+        createPipeline("shaders/SolveCollision.comp.spv", solveCollisionPipeline);
+        createPipeline("shaders/Update.comp.spv", updatePipeline);
     }
 
     void createGraphicsPipeline() {
@@ -1428,6 +1501,42 @@ private:
         vkFreeMemory(device, stagingBufferMemory, nullptr);
     }
 
+    void createHashBuffer() {
+        VkDeviceSize bufferSize = sizeof(HashCell) * TABLE_SIZE;
+
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(
+            bufferSize,
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            stagingBuffer,
+            stagingBufferMemory
+        );
+
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, cells.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        hashBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        hashBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            createBuffer(
+                bufferSize,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                hashBuffers[i],
+                hashBuffersMemory[i]
+            );
+            copyBuffer(stagingBuffer, hashBuffers[i], bufferSize);
+        }
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+    }
+
+
     void createDistanceConstraintBuffer() {
         VkDeviceSize CONSTRAINT_COUNT = distanceConstraints.size();
         std::vector<DistanceConstraint> constraints(CONSTRAINT_COUNT);
@@ -1535,7 +1644,7 @@ private:
         poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
 
         poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        poolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) * 5;
+        poolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) * 6;
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1581,7 +1690,7 @@ private:
         }
     }
     void createComputeDescriptorSetLayout() {
-        std::array<VkDescriptorSetLayoutBinding, 5> layoutBindings{};
+        std::array<VkDescriptorSetLayoutBinding, 6> layoutBindings{};
         layoutBindings[0].binding = 0;
         layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         layoutBindings[0].descriptorCount = 1;
@@ -1607,9 +1716,14 @@ private:
         layoutBindings[4].descriptorCount = 1;
         layoutBindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+        layoutBindings[5].binding = 5;
+        layoutBindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[5].descriptorCount = 1;
+        layoutBindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutInfo.bindingCount = 5;
+        layoutInfo.bindingCount = 6;
         layoutInfo.pBindings = layoutBindings.data();
 
         if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &computeDescriptorSetLayout) != VK_SUCCESS) {
@@ -1658,8 +1772,12 @@ private:
             InteractionBufferInfo.offset = 0;
 			InteractionBufferInfo.range = sizeof(InteractionState);
 
+            VkDescriptorBufferInfo HashBufferInfo{};
+            HashBufferInfo.buffer = hashBuffers[i];
+            HashBufferInfo.offset = 0;
+            HashBufferInfo.range = sizeof(HashCell) * TABLE_SIZE;
 
-            std::array<VkWriteDescriptorSet, 5> descriptorWrites{};
+            std::array<VkWriteDescriptorSet, 6> descriptorWrites{};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = computeDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -1690,8 +1808,14 @@ private:
             descriptorWrites[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             descriptorWrites[4].descriptorCount = 1;
             descriptorWrites[4].pBufferInfo = &InteractionBufferInfo;
+			descriptorWrites[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[5].dstSet = computeDescriptorSets[i];
+			descriptorWrites[5].dstBinding = 5;
+			descriptorWrites[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[5].descriptorCount = 1;
+            descriptorWrites[5].pBufferInfo = &HashBufferInfo;
 
-            vkUpdateDescriptorSets(device, 5, descriptorWrites.data(), 0, nullptr);
+            vkUpdateDescriptorSets(device, 6, descriptorWrites.data(), 0, nullptr);
         }
     }
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
@@ -1865,6 +1989,17 @@ private:
             vkCmdDispatch(commandBuffer, (particles.size() + 63) / 64, 1, 1);
             addComputeBarrier(commandBuffer, shaderStorageBuffers[writeIdx]);
 
+			// Step 1.5. Build spatial hash
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, hashClearPipeline);
+            vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MeshPushConstants), &pc);
+            vkCmdDispatch(commandBuffer, (TABLE_SIZE + 63) / 64, 1, 1);
+            addComputeBarrier(commandBuffer, hashBuffers[writeIdx]);
+
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, hashInsertPipeline);
+            vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MeshPushConstants), &pc);
+            vkCmdDispatch(commandBuffer, (particles.size() + 63) / 64, 1, 1);
+            addComputeBarrier(commandBuffer, hashBuffers[writeIdx]);
+
             // Step 2. Solve (Iterative)
             int constraintCount = 4;
             for (int j = 0; j < constraintCount; j++) {
@@ -1898,6 +2033,12 @@ private:
                     vkCmdDispatch(commandBuffer, (group.count + 63) / 64, 1, 1);
                     addComputeBarrier(commandBuffer, shaderStorageBuffers[writeIdx]);
                 }
+
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, solveCollisionPipeline);
+                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[writeIdx], 0, nullptr);
+                vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MeshPushConstants), &pc);
+                vkCmdDispatch(commandBuffer, (particles.size() + 63) / 64, 1, 1);
+                addComputeBarrier(commandBuffer, shaderStorageBuffers[writeIdx]);
             }
             // Step 3. Update
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, updatePipeline);

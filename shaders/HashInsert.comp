@@ -1,0 +1,44 @@
+#version 450
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct Particle {
+    vec4 pos; vec4 color; vec4 vel; vec4 originPos;
+    vec4 prevPos; vec4 normal; float invMass; float isFixed;
+    float isSurface; float padding; vec4 colData;
+};
+
+layout(std430, binding = 1) readonly buffer Particles { Particle particles[]; };
+
+const uint TABLE_SIZE = 100003;
+const uint MAX_PER_CELL = 15;
+const float CELL_SIZE = 0.2; // 2~4 times of particle radius recommended
+
+struct HashCell { uint count; uint pIndices[MAX_PER_CELL]; };
+layout(std430, binding = 5) buffer HashMap { HashCell cells[]; };
+
+// convert world position to grid cell coordinate
+ivec3 getGridPos(vec3 p) {
+    return ivec3(floor(p / CELL_SIZE));
+}
+
+// hash function for 3D grid coordinates
+uint hash(ivec3 c) {
+    uint h = (uint(c.x) * 73856093U) ^ (uint(c.y) * 19349663U) ^ (uint(c.z) * 83492791U);
+    return h % TABLE_SIZE;
+}
+
+void main() {
+    uint pIdx = gl_GlobalInvocationID.x;
+    if (pIdx >= particles.length()) return;
+
+    vec3 pos = particles[pIdx].pos.xyz;
+    uint h = hash(getGridPos(pos));
+
+    // Atomic operation to acquire slot
+    uint idx = atomicAdd(cells[h].count, 1);
+    
+    if (idx < MAX_PER_CELL) {
+        //cells[h].pIndices[idx] = pIdx;
+        atomicExchange(cells[h].pIndices[idx], pIdx);
+    }
+}

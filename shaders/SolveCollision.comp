@@ -1,0 +1,106 @@
+#version 450
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct Particle {
+    vec4 pos;
+    vec4 color;
+    vec4 vel;
+    vec4 originPos;
+    vec4 prevPos;
+    vec4 normal;
+    float invMass;
+    float isFixed;
+    float isSurface;
+    float padding;
+    vec4 colData; // x: groupID, y: objectID, z: padding, w: padding
+};
+
+struct Ray {
+    vec3 origin;
+    float pad0;
+    vec3 direction;
+    float pad1;
+};
+
+struct DistanceConstraint {
+    uint p1, p2;
+    float restLen;
+    float compliance; // alpha
+    float lambda;
+    float padding1, padding2, padding3;
+};
+
+layout(std430, binding = 1) buffer Particles { Particle particles[]; };
+layout(std430, binding = 2) buffer DistConstraints { DistanceConstraint constraints[]; };
+
+const uint TABLE_SIZE = 100003;
+const uint MAX_PER_CELL = 15;
+const float CELL_SIZE = 0.2;
+
+struct HashCell { uint count; uint pIndices[MAX_PER_CELL]; };
+layout(std430, binding = 5) buffer HashMap { HashCell cells[]; };
+
+ivec3 getGridPos(vec3 p) { return ivec3(floor(p / CELL_SIZE)); }
+uint hash(ivec3 c) { return ((uint(c.x) * 73856093U) ^ (uint(c.y) * 19349663U) ^ (uint(c.z) * 83492791U)) % TABLE_SIZE; }
+
+layout(push_constant) uniform PushConstants {
+    float dt;
+    float u_Time;
+    int subStepCnt;
+    int iteration;
+    int constraintOffset;
+    int constraintCount;
+	int isPressed;
+    int pickPass;
+    Ray mouseRay;
+} pc;
+
+void main() {
+    uint p1_idx = gl_GlobalInvocationID.x;
+    if (p1_idx >= particles.length()) return;
+
+    vec3 x1 = particles[p1_idx].pos.xyz;
+    float w1 = particles[p1_idx].invMass;
+    float r1 = particles[p1_idx].colData.x; // radius
+    float id1 = particles[p1_idx].colData.y; // objectID
+
+    if (w1 == 0.0) return;
+
+    ivec3 gridPos = getGridPos(x1);
+
+    for (int dx = -1; dx <= 1; dx++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                uint h = hash(gridPos + ivec3(dx, dy, dz));
+                uint count = min(cells[h].count, MAX_PER_CELL); // 오버플로우 방지
+                
+                for (uint i = 0; i < count; i++) {
+                    uint p2_idx = cells[h].pIndices[i];
+                    
+                    if (p1_idx == p2_idx) continue;
+                    
+                    float id2 = particles[p2_idx].colData.y; 
+                    if (id1 == id2) continue; // 같은 오브젝트 패스
+
+                    float w2 = particles[p2_idx].invMass;
+                    float r2 = particles[p2_idx].colData.x; 
+                    if (w1 + w2 == 0.0) continue;
+
+                    vec3 x2 = particles[p2_idx].pos.xyz;
+                    vec3 dir = x1 - x2;
+                    float dist = length(dir);
+                    float minDist = r1 + r2;
+
+                    // 충돌 보정 로직 (기존과 동일)
+                    if (dist < minDist && dist > 0.0001) {
+                        vec3 n = dir / dist;
+                        float C = dist - minDist;
+                        float s = -C / (w1 + w2);
+                        vec3 dp1 = s * w1 * n;
+                        particles[p1_idx].pos.xyz += dp1 * 0.5; 
+                    }
+                }
+            }
+        }
+    }
+}

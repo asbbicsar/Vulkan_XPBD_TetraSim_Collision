@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.21)
-project(Vulkan_XPBD_TetraSim_Interactive)
+project(Vulkan_XPBD_TetraSim_Collision)
 
 # Standard C++ version
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(SOURCES 
-    src/Vulkan_XPBD_TetraSim_Interactive.cpp
+    src/Vulkan_XPBD_TetraSim_Collision.cpp
 )
 include(FetchContent)
 

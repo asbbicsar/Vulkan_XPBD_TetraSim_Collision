@@ -1,0 +1,14 @@
+#version 450
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+const uint TABLE_SIZE = 100003;
+const uint MAX_PER_CELL = 15;
+
+struct HashCell { uint count; uint pIndices[MAX_PER_CELL]; };
+layout(std430, binding = 5) buffer HashMap { HashCell cells[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= TABLE_SIZE) return;
+    cells[idx].count = 0; // reset count for each cell
+}

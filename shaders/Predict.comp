@@ -11,6 +11,7 @@ struct Particle {
     float isFixed;
     float isSurface;
     float padding;
+    vec4 colData; // x: groupID, y: objectID, z: padding, w: padding
 };
 
 struct Ray {
