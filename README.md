@@ -1,8 +1,8 @@
-# Vulkan XPBD Interactive Simulation
+# Vulkan XPBD Collision Simulation
 
-이 프로젝트는 Vulkan API를 사용하여 구현한 XPBD 방식의 물리 시뮬레이션입니다. 마우스를 통한 클릭 및 드래그 상호작용이 가능합니다. 저장소 용량 최적화와 이식성을 위해 Vulkan SDK는 포함되어 있지 않으며, 환경 변수를 통해 로컬 SDK를 참조합니다.
+이 프로젝트는 Vulkan API를 사용하여 구현한 XPBD 방식의 물리 시뮬레이션입니다. 마우스를 통한 클릭 및 드래그 상호작용이 가능하며, 공간 해싱을 활용한 오브젝트간의 실시간 충돌이 구현되어 있습니다. 저장소 용량 최적화와 이식성을 위해 Vulkan SDK는 포함되어 있지 않으며, 환경 변수를 통해 로컬 SDK를 참조합니다.
 
-This project is a 3D physics simulation implemented by XPBD method using the Vulkan API. Users can interact by clicking and dragging the object on this program. To optimize storage space and portability, the Vulkan SDK is not included, and the local SDK is referenced via environment variables.
+This project is a 3D physics simulation implemented by XPBD method using the Vulkan API. Users can interact by clicking and dragging the object on this program with real-time collision implemented by spatial hashing. To optimize storage space and portability, the Vulkan SDK is not included, and the local SDK is referenced via environment variables.
 
 ---
 
