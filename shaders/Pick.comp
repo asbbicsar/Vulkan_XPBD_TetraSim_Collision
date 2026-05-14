@@ -1,15 +1,13 @@
 #version 450
 
-struct Particle {
+struct PhysicsVertex {
     vec4 pos;
-    vec4 color;
     vec4 vel;
-    vec4 originPos;
     vec4 prevPos;
     vec4 normal;
     float invMass;
     float isFixed;
-    float isSurface;
+    float stress;
     float padding;
     vec4 colData; // x: groupID, y: objectID, z: padding, w: padding
 };
@@ -21,7 +19,7 @@ struct Ray {
     float pad1;
 };
 
-layout(std430, binding = 0) readonly buffer InputNodes { Particle nodesIn[]; };
+layout(std430, binding = 0) readonly buffer InputNodes { PhysicsVertex nodesIn[]; };
 layout(std430, binding = 4) buffer InteractionBuffer {
     int selectedIndex;
     uint minDist;
@@ -57,7 +55,7 @@ void main() {
 
     if(index >= nodesIn.length()) return;
 
-    Particle p = nodesIn[index];
+    PhysicsVertex p = nodesIn[index];
     if (p.invMass == 0.0 && p.isFixed > 0.5) return;
 
     vec3 toNode = p.pos.xyz - pc.mouseRay.origin;

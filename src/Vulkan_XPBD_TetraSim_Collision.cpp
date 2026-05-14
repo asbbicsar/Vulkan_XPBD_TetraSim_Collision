@@ -113,9 +113,9 @@ Ray getMouseRay(GLFWwindow* window, const glm::mat4& view, const glm::mat4& proj
 
     // 1. convert to NDC(Normalized Device Coordinates) (-1 to 1)
     float x = (2.0f * (float)xpos) / width - 1.0f;
-	float y = (2.0f * (float)ypos) / height - 1.0f; // Vulkan/GLFW is Y-flipped
+    float y = (2.0f * (float)ypos) / height - 1.0f; // Vulkan/GLFW is Y-flipped
 
-	// 2. calculate inverse of Projection * View matrix
+    // 2. calculate inverse of Projection * View matrix
     glm::mat4 invVP = glm::inverse(proj * view);
 
     // 3. convert points at Near and Far planes to World Coordinate
@@ -130,47 +130,25 @@ Ray getMouseRay(GLFWwindow* window, const glm::mat4& view, const glm::mat4& proj
     ray.origin = glm::vec3(glm::inverse(view)[3]);
     ray.direction = glm::normalize(glm::vec3(farPos - nearPos));
     return ray;
-}
+};
 
-struct Particle {
+struct PhysicsVertex {
     glm::vec4 pos;
-    glm::vec4 color;
 
     glm::vec4 vel;
-    glm::vec4 originPos;
     glm::vec4 prevPos;
     glm::vec4 normal;
+
     float invMass;
     float isFixed;
-    float isSurface; 
+    float stress;
     float padding;
 
     glm::vec4 colData; //(x: radius, y : objectID, z : padding, w : padding)
+};
 
-    static VkVertexInputBindingDescription getBindingDescription() {
-        VkVertexInputBindingDescription bindingDescription{};
-        bindingDescription.binding = 0;
-        bindingDescription.stride = sizeof(Particle);
-        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-        return bindingDescription;
-    }
-
-    static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() {
-        std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
-
-        attributeDescriptions[0].binding = 0;
-        attributeDescriptions[0].location = 0;
-        attributeDescriptions[0].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-        attributeDescriptions[0].offset = offsetof(Particle, pos);
-
-        attributeDescriptions[1].binding = 0;
-        attributeDescriptions[1].location = 1;
-        attributeDescriptions[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-        attributeDescriptions[1].offset = offsetof(Particle, color);
-
-        return attributeDescriptions;
-    }
+struct RenderVertex {
+    glm::vec4 color;
 };
 
 struct Edge {
@@ -218,7 +196,7 @@ bool getValidLine(std::ifstream& file, std::string& line) {
     return false;
 }
 
-bool parseNodeFile(const std::string& filename, std::vector<Particle>& outParticles, int& outStartIndex) {
+bool parseNodeFile(const std::string& filename, std::vector<PhysicsVertex>& outPhys, std::vector<RenderVertex>& outRends, int& outStartIndex) {
     std::ifstream file(filename);
     if (!file.is_open()) {
         std::cerr << "Failed to open NODE file: " << filename << std::endl;
@@ -233,7 +211,8 @@ bool parseNodeFile(const std::string& filename, std::vector<Particle>& outPartic
     std::istringstream headerSS(line);
     headerSS >> numPoints >> dim >> numAttributes >> numBoundaryMarkers;
 
-    outParticles.reserve(numPoints);
+    outPhys.reserve(numPoints);
+    outRends.reserve(numPoints);
     bool isFirstNode = true;
 
     for (int i = 0; i < numPoints; ++i) {
@@ -241,17 +220,17 @@ bool parseNodeFile(const std::string& filename, std::vector<Particle>& outPartic
         std::istringstream iss(line);
 
         int index;
-        Particle p;
+        PhysicsVertex p;
+        iss >> index >> p.pos.x >> p.pos.y >> p.pos.z;
+        p.vel = glm::vec4(0.0f);
+        p.prevPos = p.pos;
+
         p.invMass = float(numPoints); // 기본 역질량 설정
         p.isFixed = 0.0f;
-        p.isSurface = 0.0f;
+		p.stress = 0.0f;
 
-        iss >> index >> p.pos.x >> p.pos.y >> p.pos.z;
-
-        p.color = glm::vec4(p.pos.x, p.pos.y, p.pos.z, 1.0f);
-        p.vel = glm::vec4(0.0f);
-        p.originPos = p.pos;
-        p.prevPos = p.pos;
+        RenderVertex r;
+		r.color = glm::vec4(p.pos.x, p.pos.y, p.pos.z, 1.0f);
 
         // 첫 번째 정점의 인덱스가 0인지 1인지 기록 (ele 파일 파싱 시 사용)
         if (isFirstNode) {
@@ -259,10 +238,11 @@ bool parseNodeFile(const std::string& filename, std::vector<Particle>& outPartic
             isFirstNode = false;
         }
 
-        outParticles.push_back(p);
+        outPhys.push_back(p);
+		outRends.push_back(r);
     }
 
-    std::cout << "Loaded " << outParticles.size() << " particles." << std::endl;
+    std::cout << "Loaded " << outPhys.size() << " physics vertices." << std::endl;
     return true;
 }
 
@@ -387,12 +367,12 @@ bool parseFaceFile(const std::string& filename, int startIndex, std::vector<Face
     return true;
 }
 
-bool generateDistanceConstraints(const std::vector<Particle>& particles, const std::vector<Edge>& edges, const float& stiffness, std::vector<DistanceConstraint>& outConstraints) {
+bool generateDistanceConstraints(const std::vector<PhysicsVertex>& phys, const std::vector<Edge>& edges, const float& stiffness, std::vector<DistanceConstraint>& outConstraints) {
     for (const auto& edge : edges) {
         DistanceConstraint dc{};
         dc.p1 = edge.indices[0];
         dc.p2 = edge.indices[1];
-        dc.restLen = glm::length(glm::vec3(particles[dc.p1].pos - particles[dc.p2].pos));
+        dc.restLen = glm::length(glm::vec3(phys[dc.p1].pos - phys[dc.p2].pos));
         dc.compliance = dc.restLen / stiffness;
         dc.lambda = 0.0f;
         outConstraints.push_back(dc);
@@ -400,16 +380,16 @@ bool generateDistanceConstraints(const std::vector<Particle>& particles, const s
     return true;
 }
 
-bool generateVolumeConstraints(const std::vector<Particle>& particles, const std::vector<Tetrahedron>& tetras, const float& stiffness, std::vector<VolumeConstraint>& outConstraints) {
+bool generateVolumeConstraints(const std::vector<PhysicsVertex>& phys, const std::vector<Tetrahedron>& tetras, const float& stiffness, std::vector<VolumeConstraint>& outConstraints) {
     for (const auto& tetra : tetras) {
         VolumeConstraint vc{};
         vc.p1 = tetra.indices[0];
         vc.p2 = tetra.indices[1];
         vc.p3 = tetra.indices[2];
         vc.p4 = tetra.indices[3];
-        vc.restVol = glm::dot(glm::cross(glm::vec3(particles[vc.p2].pos - particles[vc.p1].pos),
-            glm::vec3(particles[vc.p3].pos - particles[vc.p1].pos)),
-            glm::vec3(particles[vc.p4].pos - particles[vc.p1].pos)) / 6.0f;
+        vc.restVol = glm::dot(glm::cross(glm::vec3(phys[vc.p2].pos - phys[vc.p1].pos),
+            glm::vec3(phys[vc.p3].pos - phys[vc.p1].pos)),
+            glm::vec3(phys[vc.p4].pos - phys[vc.p1].pos)) / 6.0f;
         vc.compliance = vc.restVol / stiffness;
         vc.lambda = 0.0f;
         outConstraints.push_back(vc);
@@ -570,7 +550,8 @@ private:
 
     VkCommandPool commandPool;
 
-    std::vector<Particle> particles;
+    std::vector<PhysicsVertex> physicsVerts;
+	std::vector<RenderVertex> renderVerts;
     std::vector<Tetrahedron> tetras;
     std::vector<Edge> edges;
     std::vector<Face> faces;
@@ -584,8 +565,10 @@ private:
     std::vector<ColorGroup> distanceColorGroups;
     std::vector<ColorGroup> volumeColorGroups;
 
-    std::vector<VkBuffer> shaderStorageBuffers;
-    std::vector<VkDeviceMemory> shaderStorageBuffersMemory;
+    std::vector<VkBuffer> physicsVertexBuffers;
+    std::vector<VkDeviceMemory> physicsVertexBuffersMemory;
+    std::vector<VkBuffer> renderVertexBuffers;
+    std::vector<VkDeviceMemory> renderVertexBuffersMemory;
     std::vector<VkBuffer> interactionBuffers;
     std::vector<VkDeviceMemory> interactionBuffersMemory;
     std::vector<VkBuffer> hashBuffers;
@@ -634,29 +617,29 @@ private:
         float objectID = 0.0f) 
     {
         int startIndex;
-        uint32_t indexOffset = particles.size(); // 기존 파티클 개수를 오프셋으로 사용
+        uint32_t indexOffset = physicsVerts.size(); // 기존 파티클 개수를 오프셋으로 사용
 
-        std::vector<Particle> tempParticles;
+        std::vector<PhysicsVertex> tempPhysicsVerts;
+		std::vector<RenderVertex> tempRenderVerts;
         std::vector<Tetrahedron> tempTetras;
         std::vector<Edge> tempEdges;
         std::vector<Face> tempFaces;
 
-        if (!parseNodeFile(nodeFile, tempParticles, startIndex)) {
+        if (!parseNodeFile(nodeFile, tempPhysicsVerts, tempRenderVerts, startIndex)) {
             throw std::runtime_error("Failed to load node file!");
         }
 
         // 초기 위치 조정 (두 객체가 겹치지 않게 하기 위함)
-        for (auto& p : tempParticles) {
+        for (auto& p : tempPhysicsVerts) {
             p.pos.x += initialOffset.x;
             p.pos.y += initialOffset.y;
             p.pos.z += initialOffset.z;
-            p.originPos = p.pos;
             p.prevPos = p.pos;
 
             p.colData = glm::vec4(0.05f, objectID, 0.0f, 0.0f);
         }
-        particles.insert(particles.end(), tempParticles.begin(), tempParticles.end());
-
+        physicsVerts.insert(physicsVerts.end(), tempPhysicsVerts.begin(), tempPhysicsVerts.end());
+        renderVerts.insert(renderVerts.end(), tempRenderVerts.begin(), tempRenderVerts.end());
         if (!parseEleFile(eleFile, startIndex, tempTetras)) { /* 에러 처리 */ }
         for (auto& tet : tempTetras) {
             for (int i = 0; i < 4; ++i) tet.indices[i] += indexOffset;
@@ -688,18 +671,18 @@ private:
     }
     
     void createConstraints() {
-        if (!generateDistanceConstraints(particles, edges, stiffness, distanceConstraints)) {
+        if (!generateDistanceConstraints(physicsVerts, edges, stiffness, distanceConstraints)) {
             throw std::runtime_error("Failed to generate distance constraints!");
         }
-        if (!generateVolumeConstraints(particles, tetras, stiffness, volumeConstraints)) {
+        if (!generateVolumeConstraints(physicsVerts, tetras, stiffness, volumeConstraints)) {
             throw std::runtime_error("Failed to generate volume constraints!");
         }
 
-        auto distResult = colorDistanceConstraints(distanceConstraints, particles.size());
+        auto distResult = colorDistanceConstraints(distanceConstraints, physicsVerts.size());
         distanceConstraints = distResult.reorderedConstraints;
         distanceColorGroups = distResult.groups;
 
-        auto volResult = colorVolumeConstraints(volumeConstraints, particles.size());
+        auto volResult = colorVolumeConstraints(volumeConstraints, physicsVerts.size());
         volumeConstraints = volResult.reorderedConstraints;
         volumeColorGroups = volResult.groups;
 
@@ -749,13 +732,13 @@ private:
         createDepthResources();
         createRenderPass();
         createComputeDescriptorSetLayout();
-        createDescriptorSetLayout();
+        createRenderDescriptorSetLayout();
         //createComputePipeline();
         createComputePipelines();
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPool();
-        createShaderStorageBuffer();
+        createShaderStorageBuffers();
         createInteractionBuffer();
 		createHashBuffer();
         createDistanceConstraintBuffer();
@@ -764,7 +747,7 @@ private:
         createUniformBuffers();
         createDescriptorPool();
         createComputeDescriptorSets();
-        createDescriptorSets();
+        createRenderDescriptorSets();
         createCommandBuffers();
         createSyncObjects();
     }
@@ -814,8 +797,10 @@ private:
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             vkDestroyBuffer(device, uniformBuffers[i], nullptr);
             vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
-            vkDestroyBuffer(device, shaderStorageBuffers[i], nullptr);
-            vkFreeMemory(device, shaderStorageBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, physicsVertexBuffers[i], nullptr);
+            vkFreeMemory(device, physicsVertexBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, renderVertexBuffers[i], nullptr);
+            vkFreeMemory(device, renderVertexBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, interactionBuffers[i], nullptr);
             vkFreeMemory(device, interactionBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, hashBuffers[i], nullptr);
@@ -1198,22 +1183,33 @@ private:
             throw std::runtime_error("failed to create render pass!");
         }
     }
+    void createRenderDescriptorSetLayout() {
+        std::array<VkDescriptorSetLayoutBinding, 3> layoutBindings{};
+        layoutBindings[0].binding = 0;
+        layoutBindings[0].descriptorCount = 1;
+        layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        layoutBindings[0].pImmutableSamplers = nullptr;
+        layoutBindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
-    void createDescriptorSetLayout() {
-        VkDescriptorSetLayoutBinding uboLayoutBinding{};
-        uboLayoutBinding.binding = 0;
-        uboLayoutBinding.descriptorCount = 1;
-        uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        uboLayoutBinding.pImmutableSamplers = nullptr;
-        uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        layoutBindings[1].binding = 1;
+        layoutBindings[1].descriptorCount = 1;
+        layoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[1].pImmutableSamplers = nullptr;
+        layoutBindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        layoutBindings[2].binding = 2;
+        layoutBindings[2].descriptorCount = 1;
+        layoutBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[2].pImmutableSamplers = nullptr;
+        layoutBindings[2].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutInfo.bindingCount = 1;
-        layoutInfo.pBindings = &uboLayoutBinding;
+        layoutInfo.bindingCount = 3;
+        layoutInfo.pBindings = layoutBindings.data();
 
         if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS) {
-            throw std::runtime_error("failed to create descriptor set layout!");
+            throw std::runtime_error("failed to create render descriptor set layout!");
         }
     }
 
@@ -1291,13 +1287,10 @@ private:
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 
-        auto bindingDescription = Particle::getBindingDescription();
-        auto attributeDescriptions = Particle::getAttributeDescriptions();
-
-        vertexInputInfo.vertexBindingDescriptionCount = 1;
-        vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
-        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
-        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+        vertexInputInfo.vertexBindingDescriptionCount = 0;
+        vertexInputInfo.vertexAttributeDescriptionCount = 0;
+        vertexInputInfo.pVertexBindingDescriptions = nullptr;
+        vertexInputInfo.pVertexAttributeDescriptions = nullptr;
 
         VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
         inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -1427,8 +1420,13 @@ private:
         }
     }
 
-    void createShaderStorageBuffer() {
-        VkDeviceSize bufferSize = sizeof(Particle) * particles.size();
+    void createShaderStorageBuffers() {
+        createPhysicsVertexBuffer();
+        createRenderVertexBuffer();
+    }
+
+    void createPhysicsVertexBuffer() {
+        VkDeviceSize bufferSize = sizeof(PhysicsVertex) * physicsVerts.size();
 
         VkBuffer stagingBuffer;
         VkDeviceMemory stagingBufferMemory;
@@ -1442,21 +1440,56 @@ private:
 
         void* data;
         vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
-        memcpy(data, particles.data(), (size_t)bufferSize);
+        memcpy(data, physicsVerts.data(), (size_t)bufferSize);
         vkUnmapMemory(device, stagingBufferMemory);
 
-        shaderStorageBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-        shaderStorageBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+        physicsVertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        physicsVertexBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            createBuffer(
+                bufferSize,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                physicsVertexBuffers[i],
+                physicsVertexBuffersMemory[i]
+            );
+            copyBuffer(stagingBuffer, physicsVertexBuffers[i], bufferSize);
+        }
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+    }
+
+    void createRenderVertexBuffer() {
+        VkDeviceSize bufferSize = sizeof(RenderVertex) * renderVerts.size();
+
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(
+            bufferSize,
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            stagingBuffer,
+            stagingBufferMemory
+        );
+
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, renderVerts.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        renderVertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        renderVertexBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             createBuffer(
                 bufferSize,
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                shaderStorageBuffers[i],
-                shaderStorageBuffersMemory[i]
+                renderVertexBuffers[i],
+                renderVertexBuffersMemory[i]
             );
-            copyBuffer(stagingBuffer, shaderStorageBuffers[i], bufferSize);
+            copyBuffer(stagingBuffer, renderVertexBuffers[i], bufferSize);
         }
         vkDestroyBuffer(device, stagingBuffer, nullptr);
         vkFreeMemory(device, stagingBufferMemory, nullptr);
@@ -1490,7 +1523,7 @@ private:
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             createBuffer(
                 bufferSize,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                 interactionBuffers[i],
                 interactionBuffersMemory[i]
@@ -1658,7 +1691,7 @@ private:
         }
     }
 
-    void createDescriptorSets() {
+    void createRenderDescriptorSets() {
         std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, descriptorSetLayout);
         VkDescriptorSetAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -1677,16 +1710,42 @@ private:
             bufferInfo.offset = 0;
             bufferInfo.range = sizeof(UniformBufferObject);
 
-            VkWriteDescriptorSet descriptorWrite{};
-            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrite.dstSet = descriptorSets[i];
-            descriptorWrite.dstBinding = 0;
-            descriptorWrite.dstArrayElement = 0;
-            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            descriptorWrite.descriptorCount = 1;
-            descriptorWrite.pBufferInfo = &bufferInfo;
+            VkDescriptorBufferInfo physicsInfo{};
+            physicsInfo.buffer = physicsVertexBuffers[i];
+            physicsInfo.offset = 0;
+            physicsInfo.range = sizeof(PhysicsVertex) * physicsVerts.size();
 
-            vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+            VkDescriptorBufferInfo renderInfo{};
+            renderInfo.buffer = renderVertexBuffers[i];
+            renderInfo.offset = 0;
+            renderInfo.range = sizeof(RenderVertex) * renderVerts.size();
+
+            std::array<VkWriteDescriptorSet, 3> descriptorWrites{};
+            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[0].dstSet = descriptorSets[i];
+            descriptorWrites[0].dstBinding = 0;
+            descriptorWrites[0].dstArrayElement = 0;
+            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptorWrites[0].descriptorCount = 1;
+            descriptorWrites[0].pBufferInfo = &bufferInfo;
+
+            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[1].dstSet = descriptorSets[i];
+            descriptorWrites[1].dstBinding = 1;
+            descriptorWrites[1].dstArrayElement = 0;
+            descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[1].descriptorCount = 1;
+            descriptorWrites[1].pBufferInfo = &physicsInfo;
+
+            descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[2].dstSet = descriptorSets[i];
+            descriptorWrites[2].dstBinding = 2;
+            descriptorWrites[2].dstArrayElement = 0;
+            descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[2].descriptorCount = 1;
+            descriptorWrites[2].pBufferInfo = &renderInfo;
+
+            vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
         }
     }
     void createComputeDescriptorSetLayout() {
@@ -1748,14 +1807,14 @@ private:
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             VkDescriptorBufferInfo inBufferInfo{};
-            inBufferInfo.buffer = shaderStorageBuffers[(i + 1) % MAX_FRAMES_IN_FLIGHT]; // 우리가 만든 SSBO
+            inBufferInfo.buffer = physicsVertexBuffers[(i + 1) % MAX_FRAMES_IN_FLIGHT]; // 우리가 만든 SSBO
             inBufferInfo.offset = 0;
-            inBufferInfo.range = sizeof(Particle) * particles.size();
+            inBufferInfo.range = sizeof(PhysicsVertex) * physicsVerts.size();
 
             VkDescriptorBufferInfo outBufferInfo{};
-            outBufferInfo.buffer = shaderStorageBuffers[i]; // 우리가 만든 SSBO
+            outBufferInfo.buffer = physicsVertexBuffers[i]; // 우리가 만든 SSBO
             outBufferInfo.offset = 0;
-            outBufferInfo.range = sizeof(Particle) * particles.size();
+            outBufferInfo.range = sizeof(PhysicsVertex) * physicsVerts.size();
 
             VkDescriptorBufferInfo DistanceConstraintBufferInfo{};
             DistanceConstraintBufferInfo.buffer = distanceConstraintsBuffer;
@@ -1932,13 +1991,13 @@ private:
 			// Pass 1: find out the closest node
             pc.pickPass = 1;
             vkCmdPushConstants(commandBuffers[currentFrame], computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MeshPushConstants), &pc);
-            vkCmdDispatch(commandBuffers[currentFrame], (particles.size() + 63) / 64, 1, 1);
+            vkCmdDispatch(commandBuffers[currentFrame], (physicsVerts.size() + 63) / 64, 1, 1);
             addComputeBarrier(commandBuffers[currentFrame], interactionBuffers[writeIdx]);
 
             // Pass 2: confirm the picked node index
             pc.pickPass = 2;
             vkCmdPushConstants(commandBuffers[currentFrame], computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MeshPushConstants), &pc);
-            vkCmdDispatch(commandBuffers[currentFrame], (particles.size() + 63) / 64, 1, 1);
+            vkCmdDispatch(commandBuffers[currentFrame], (physicsVerts.size() + 63) / 64, 1, 1);
             addComputeBarrier(commandBuffers[currentFrame], interactionBuffers[writeIdx]);
 
             VkBufferCopy copyRegion{};
@@ -1986,18 +2045,18 @@ private:
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout,
                 0, 1, &computeDescriptorSets[writeIdx], 0, nullptr);
             vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MeshPushConstants), &pc);
-            vkCmdDispatch(commandBuffer, (particles.size() + 63) / 64, 1, 1);
-            addComputeBarrier(commandBuffer, shaderStorageBuffers[writeIdx]);
+            vkCmdDispatch(commandBuffer, (physicsVerts.size() + 63) / 64, 1, 1);
+            addComputeBarrier(commandBuffer, physicsVertexBuffers[writeIdx]);
 
 			// Step 1.5. Build spatial hash
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, hashClearPipeline);
             vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MeshPushConstants), &pc);
             vkCmdDispatch(commandBuffer, (TABLE_SIZE + 63) / 64, 1, 1);
             addComputeBarrier(commandBuffer, hashBuffers[writeIdx]);
-
+            
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, hashInsertPipeline);
             vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MeshPushConstants), &pc);
-            vkCmdDispatch(commandBuffer, (particles.size() + 63) / 64, 1, 1);
+            vkCmdDispatch(commandBuffer, (physicsVerts.size() + 63) / 64, 1, 1);
             addComputeBarrier(commandBuffer, hashBuffers[writeIdx]);
 
             // Step 2. Solve (Iterative)
@@ -2009,7 +2068,7 @@ private:
                 vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[writeIdx], 0, nullptr);
                 vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MeshPushConstants), &pc);
                 vkCmdDispatch(commandBuffer, 1, 1, 1);
-                addComputeBarrier(commandBuffer, shaderStorageBuffers[writeIdx]);
+                addComputeBarrier(commandBuffer, physicsVertexBuffers[writeIdx]);
 
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, solveDistPipeline);
                 vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout,
@@ -2020,7 +2079,7 @@ private:
                     pc.constraintCount = group.count;
                     vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MeshPushConstants), &pc);
                     vkCmdDispatch(commandBuffer, (group.count + 63) / 64, 1, 1);
-                    addComputeBarrier(commandBuffer, shaderStorageBuffers[writeIdx]);
+                    addComputeBarrier(commandBuffer, physicsVertexBuffers[writeIdx]);
                 }
 
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, solveVolPipeline);
@@ -2031,35 +2090,34 @@ private:
                     pc.constraintCount = group.count;
                     vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MeshPushConstants), &pc);
                     vkCmdDispatch(commandBuffer, (group.count + 63) / 64, 1, 1);
-                    addComputeBarrier(commandBuffer, shaderStorageBuffers[writeIdx]);
+                    addComputeBarrier(commandBuffer, physicsVertexBuffers[writeIdx]);
                 }
 
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, solveCollisionPipeline);
                 vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[writeIdx], 0, nullptr);
                 vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MeshPushConstants), &pc);
-                vkCmdDispatch(commandBuffer, (particles.size() + 63) / 64, 1, 1);
-                addComputeBarrier(commandBuffer, shaderStorageBuffers[writeIdx]);
+                vkCmdDispatch(commandBuffer, (physicsVerts.size() + 63) / 64, 1, 1);
+                addComputeBarrier(commandBuffer, physicsVertexBuffers[writeIdx]);
             }
             // Step 3. Update
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, updatePipeline);
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout,
                 0, 1, &computeDescriptorSets[readIdx], 0, nullptr); // Update는 readIdx를 읽고 writeIdx에 쓰는 형태이므로, readIdx로 바인딩
             vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MeshPushConstants), &pc);
-            vkCmdDispatch(commandBuffer, (particles.size() + 63) / 64, 1, 1);
-            addComputeBarrier(commandBuffer, shaderStorageBuffers[readIdx]);
+            vkCmdDispatch(commandBuffer, (physicsVerts.size() + 63) / 64, 1, 1);
+            addComputeBarrier(commandBuffer, physicsVertexBuffers[readIdx]);
         }
 
 
-        // ver 1
         VkBufferCopy copyRegion{};
         copyRegion.srcOffset = 0;
         copyRegion.dstOffset = 0;
-        copyRegion.size = sizeof(Particle) * particles.size();
+        copyRegion.size = sizeof(PhysicsVertex) * physicsVerts.size();
         
         vkCmdCopyBuffer(
             commandBuffer,
-            shaderStorageBuffers[readIdx],
-            shaderStorageBuffers[writeIdx],
+            physicsVertexBuffers[readIdx],
+            physicsVertexBuffers[writeIdx],
             1,
             &copyRegion
         );
@@ -2067,17 +2125,17 @@ private:
         VkBufferMemoryBarrier barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.buffer = shaderStorageBuffers[writeIdx];
+        barrier.buffer = physicsVertexBuffers[writeIdx];
         barrier.offset = 0;
         barrier.size = VK_WHOLE_SIZE;
         
         vkCmdPipelineBarrier(
             commandBuffer,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0, 0, nullptr, 1, &barrier, 0, nullptr
         );
 
@@ -2114,11 +2172,6 @@ private:
         scissor.extent = swapChainExtent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-        VkBuffer SSBuffers[] = { shaderStorageBuffers[readIdx] };
-        VkDeviceSize offsets[] = { 0 };
-        vkCmdBindVertexBuffers(commandBuffer, 0, 1, SSBuffers, offsets);
-        //VkBuffer vertexBuffers[] = { vertexBuffer };
-        //VkDeviceSize offsets[] = { 0 };
         vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
         vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);

@@ -1,13 +1,19 @@
 #version 450
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-struct Particle {
-    vec4 pos; vec4 color; vec4 vel; vec4 originPos;
-    vec4 prevPos; vec4 normal; float invMass; float isFixed;
-    float isSurface; float padding; vec4 colData;
+struct PhysicsVertex {
+    vec4 pos;
+    vec4 vel;
+    vec4 prevPos;
+    vec4 normal;
+    float invMass;
+    float isFixed;
+    float stress;
+    float padding;
+    vec4 colData; // x: groupID, y: objectID, z: padding, w: padding
 };
 
-layout(std430, binding = 1) readonly buffer Particles { Particle particles[]; };
+layout(std430, binding = 1) readonly buffer Particles { PhysicsVertex particles[]; };
 
 const uint TABLE_SIZE = 100003;
 const uint MAX_PER_CELL = 15;
